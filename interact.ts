@@ -1,9 +1,9 @@
 /* eslint-disable no-await-in-loop */
 import RuntimeClientFactory from '@voiceflow/runtime-client-js';
-import axios from 'axios';
 import dotenv from 'dotenv';
 import { RequestHandler } from 'express';
 
+import { sendImage, sendMessage, sendTypingStatus } from './request';
 import kvstore from './store';
 
 // load in environment variables from .env file
@@ -17,8 +17,6 @@ const runtimeClientFactory = new RuntimeClientFactory({
   },
 });
 
-const MESSENGER_API_ENDPOINT = process.env.MESSENGER_API_ENDPOINT || 'https://graph.facebook.com/v9.0';
-
 // Fetch the conversation state from persistence
 const getState = async (senderID: string, appID: string): Promise<any | undefined> => {
   const stateKey = `${appID}-${senderID}`;
@@ -30,56 +28,6 @@ const saveState = async (senderID: string, appID: string, state: any) => {
   return kvstore.set(stateKey, state);
 };
 
-const sendRequest = async (message: any, recipient: string) => {
-  return axios
-    .post(
-      `${MESSENGER_API_ENDPOINT}/me/messages`,
-      {
-        messaging_type: 'RESPONSE',
-        recipient: {
-          id: recipient,
-        },
-        message,
-      },
-      {
-        params: {
-          access_token: process.env.PAGE_ACCESS_TOKEN,
-        },
-      }
-    )
-    .catch((error) => {
-      console.error(error?.response?.data || error);
-    });
-};
-
-const sendMessage = async (text: string, chips: string[], recipient: string) =>
-  sendRequest(
-    {
-      text,
-      ...(chips.length && {
-        quick_replies: chips.map((name) => ({
-          content_type: 'text',
-          title: name,
-          payload: name,
-        })),
-      }),
-    },
-    recipient
-  );
-
-const sendImage = async (url: string, recipient: string) =>
-  sendRequest(
-    {
-      attachment: {
-        type: 'image',
-        payload: {
-          url,
-        },
-      },
-    },
-    recipient
-  );
-
 const handleMessage = async (senderID: string, appID: string, message: string): Promise<any> => {
   const state = await getState(senderID, appID);
   const client = runtimeClientFactory.createClient(state);
@@ -89,10 +37,16 @@ const handleMessage = async (senderID: string, appID: string, message: string): 
   await saveState(senderID, appID, context.toJSON().state);
   const chips = context.getChips().map(({ name }) => name);
 
+  const response = context.getResponse();
+  const lastSpeakIndex = response.map(({ type }) => type).lastIndexOf('speak' as any);
+
   // eslint-disable-next-line no-restricted-syntax
-  for (const trace of context.getResponse()) {
+  for (let i = 0; i < response.length; i++) {
+    const trace = response[i];
     if (trace.type === 'speak') {
-      await sendMessage(trace.payload.message, chips, senderID);
+      const quickReplies = i === lastSpeakIndex ? chips : [];
+      // only send suggestion chips with the last speak
+      await sendMessage(trace.payload.message, quickReplies, senderID);
       console.log(`sent message: ${trace.payload.message}`);
     }
     if (trace.type === 'visual') {
@@ -103,7 +57,7 @@ const handleMessage = async (senderID: string, appID: string, message: string): 
   return 'ok';
 };
 
-const interact: RequestHandler = (req, res) => {
+const interact: RequestHandler = async (req, res) => {
   const { body } = req;
   if (body.object !== 'page') {
     res.sendStatus(404);
@@ -112,6 +66,11 @@ const interact: RequestHandler = (req, res) => {
 
   // Iterates over each entry - there may be multiple if batched
   body.entry.forEach(async (entry: any) => {
+    // do not handle messages older than 5 seconds
+    if (Date.now() - entry.time > 5000) {
+      return;
+    }
+
     // Gets the body of the webhook event
     const webhookEvent = entry.messaging[0];
 
@@ -129,7 +88,9 @@ const interact: RequestHandler = (req, res) => {
     // SenderID -> Who is interacting with the app?
     // AppID -> What is the target "skill"?
     // Message -> Text
+    await sendTypingStatus(true, webhookEvent.sender.id);
     await handleMessage(webhookEvent.sender.id, webhookEvent.recipient.id, webhookEvent.message.text);
+    await sendTypingStatus(false, webhookEvent.sender.id);
   });
 
   res.send('EVENT_RECEIVED');
