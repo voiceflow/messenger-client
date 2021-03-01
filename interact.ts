@@ -1,5 +1,4 @@
-/* eslint-disable no-await-in-loop */
-import RuntimeClientFactory from '@voiceflow/runtime-client-js';
+import RuntimeClientFactory, { TraceType } from '@voiceflow/runtime-client-js';
 import dotenv from 'dotenv';
 import { RequestHandler } from 'express';
 
@@ -11,18 +10,17 @@ dotenv.config();
 
 const runtimeClientFactory = new RuntimeClientFactory({
   versionID: process.env.VOICEFLOW_VERSION_ID!, // voiceflow project versionID
+  apiKey: process.env.VOICEFLOW_API_KEY!, // voiceflow api key
   endpoint: process.env.VOICEFLOW_RUNTIME_ENDPOINT,
-  dataConfig: {
-    includeTypes: ['speak', 'visual'],
-  },
 });
 
-// Fetch the conversation state from persistence
+// fetch the conversation state from persistence
 const getState = async (senderID: string, appID: string): Promise<any | undefined> => {
   const stateKey = `${appID}-${senderID}`;
   return kvstore.get(stateKey);
 };
 
+// save the conversations tate to persistence
 const saveState = async (senderID: string, appID: string, state: any) => {
   const stateKey = `${appID}-${senderID}`;
   return kvstore.set(stateKey, state);
@@ -32,27 +30,26 @@ const handleMessage = async (senderID: string, appID: string, message: string): 
   const state = await getState(senderID, appID);
   const client = runtimeClientFactory.createClient(state);
 
+  client.onSpeak(async (trace, context, index) => {
+    // get the index of the last speak trace
+    const lastSpeakIndex = context
+      .getTrace()
+      .map(({ type }) => type)
+      .lastIndexOf(TraceType.SPEAK);
+    const chips = context.getChips().map(({ name }) => name);
+
+    const quickReplies = index === lastSpeakIndex ? chips : [];
+    await sendMessage(trace.payload.message, quickReplies, senderID);
+  });
+
+  client.onVisual(async (trace) => {
+    if (trace.payload.image) {
+      await sendImage(trace.payload.image, senderID);
+    }
+  });
+
   const context = await client.sendText(message);
-
   await saveState(senderID, appID, context.toJSON().state);
-  const chips = context.getChips().map(({ name }) => name);
-
-  const response = context.getResponse();
-  const lastSpeakIndex = response.map(({ type }) => type).lastIndexOf('speak' as any);
-
-  // eslint-disable-next-line no-restricted-syntax
-  for (let i = 0; i < response.length; i++) {
-    const trace = response[i];
-    if (trace.type === 'speak') {
-      const quickReplies = i === lastSpeakIndex ? chips : [];
-      // only send suggestion chips with the last speak
-      await sendMessage(trace.payload.message, quickReplies, senderID);
-      console.log(`sent message: ${trace.payload.message}`);
-    }
-    if (trace.type === 'visual') {
-      await sendImage((trace.payload as any).image, senderID);
-    }
-  }
 
   return 'ok';
 };

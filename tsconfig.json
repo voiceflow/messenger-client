@@ -40,7 +40,7 @@
   "include": [
     "**/*.ts",
     "typings/**/*.d.ts"
-  ],
+, "scratch.js"  ],
   "exclude": [
     "node_modules/**"
   ]
