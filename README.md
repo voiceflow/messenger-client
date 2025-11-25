@@ -1,3 +1,6 @@
+> [!CAUTION]
+> Update Nov 25, 2025: This repository has been archived and will not accept further changes.
+
 # Voiceflow Messenger JS
 
 This creates an node/express server for creating and handling a messenger chatbot running off a Voiceflow project.
